@@ -1,0 +1,95 @@
+name: macOS 10.13 Release Build
+
+on:
+  push:
+    branches: [macos-10.13-support]
+  workflow_dispatch:
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  build:
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Export GitHub Actions cache variables
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Install vcpkg dependencies
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg ~/vcpkg
+          cd ~/vcpkg && ./bootstrap-vcpkg.sh
+          export VCPKG_ROOT=~/vcpkg
+          ./vcpkg install libvpx libyuv opus aom
+
+      - name: Download Sciter library
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/c-smile/sciter-sdk.git /tmp/sciter-sdk
+          cd /tmp/sciter-sdk && git sparse-checkout set bin.osx
+          cp bin.osx/libsciter.dylib $GITHUB_WORKSPACE/
+
+      - name: Build
+        run: |
+          export VCPKG_ROOT=~/vcpkg
+          MACOSX_DEPLOYMENT_TARGET=10.13 cargo build --release
+
+      - name: Verify deployment target
+        run: |
+          otool -l target/release/rustdesk | grep -A2 LC_VERSION_MIN_MACOSX
+          file target/release/rustdesk
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release
+          cp target/release/rustdesk release/
+          cp libsciter.dylib release/
+          cd release && tar czf ../rustdesk-macos-10.13-x86_64.tar.gz *
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Create/Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-10.13-v${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}
+          name: "RustDesk macOS 10.13 (High Sierra) - v${{ steps.version.outputs.version }}"
+          body: |
+            RustDesk built for macOS 10.13 High Sierra (Sciter UI).
+
+            **Requirements:**
+            - macOS 10.13 or later (x86_64)
+            - Place `libsciter.dylib` next to `rustdesk` binary
+
+            **Limitations on 10.13:**
+            - No granular Screen Recording/Input Monitoring permissions (appeared in 10.15)
+            - No ScreenCaptureKit (appeared in 12.3)
+          files: rustdesk-macos-10.13-x86_64.tar.gz
+          draft: false
+          prerelease: false
